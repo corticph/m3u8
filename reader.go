@@ -25,8 +25,8 @@ import (
 
 // TimeParse allows globally apply and/or override Time Parser function.
 // Available variants:
-//   - FullTimeParse - implements full featured ISO/IEC 8601:2004
-//   - StrictTimeParse - implements only RFC3339 Nanoseconds format
+//		* FullTimeParse - implements full featured ISO/IEC 8601:2004
+//		* StrictTimeParse - implements only RFC3339 Nanoseconds format
 var TimeParse func(value string) (time.Time, error) = FullTimeParse
 
 var (
