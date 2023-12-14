@@ -4,6 +4,10 @@
 *.so
 *~
 
+# IDE
+.idea/*
+/workspace.xml
+
 # Folders
 _obj
 _test
