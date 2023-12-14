@@ -5,6 +5,7 @@ import (
 	"errors"
 
 	"github.com/corticph/m3u8"
+	"github.com/corticph/m3u8/decoder"
 )
 
 // #CUSTOM-SEGMENT-TAG:<attribute-list>
@@ -31,7 +32,7 @@ func (tag *CustomSegmentTag) Decode(line string) (m3u8.CustomTag, error) {
 	// as there can be one for each segment with
 	newTag := new(CustomSegmentTag)
 
-	for k, v := range m3u8.DecodeAttributeList(line[20:]) {
+	for k, v := range decoder.DecodeAttributeList(line[20:]) {
 		switch k {
 		case "NAME":
 			newTag.Name = v

@@ -16,19 +16,24 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
-)
 
-var reKeyValue = regexp.MustCompile(`([a-zA-Z0-9_-]+)=("[^"]+"|[^",]+)`)
+	"github.com/corticph/m3u8/decoder"
+)
 
 // TimeParse allows globally apply and/or override Time Parser function.
 // Available variants:
-//		* FullTimeParse - implements full featured ISO/IEC 8601:2004
-//		* StrictTimeParse - implements only RFC3339 Nanoseconds format
+//   - FullTimeParse - implements full featured ISO/IEC 8601:2004
+//   - StrictTimeParse - implements only RFC3339 Nanoseconds format
 var TimeParse func(value string) (time.Time, error) = FullTimeParse
+
+var (
+	partialSegmentDecoder     = &decoder.PartialSegmentTag{}
+	preloadHintDecoder        = &decoder.PreloadHintTag{}
+	partialSegmentInfoDecoder = &decoder.PartialSegmentInfoTag{}
+)
 
 // Decode parses a master playlist passed from the buffer. If `strict`
 // parameter is true then it returns first syntax error.
@@ -138,6 +143,10 @@ func (p *MediaPlaylist) decode(buf *bytes.Buffer, strict bool) error {
 	if state.tagWV {
 		p.WV = wv
 	}
+	err = afterMediaPlaylistWasDecoded(p, state, strict)
+	if strict && err != nil {
+		return err
+	}
 	if strict && !state.m3u {
 		return errors.New("#EXTM3U absent")
 	}
@@ -233,6 +242,12 @@ func decode(buf *bytes.Buffer, strict bool, customDecoders []CustomDecoder) (Pla
 	if state.listType == MEDIA && state.tagWV {
 		media.WV = wv
 	}
+	if state.listType == MEDIA {
+		err = afterMediaPlaylistWasDecoded(media, state, strict)
+		if strict && err != nil {
+			return media, state.listType, err
+		}
+	}
 
 	if strict && !state.m3u {
 		return nil, listType, errors.New("#EXTM3U absent")
@@ -249,21 +264,6 @@ func decode(buf *bytes.Buffer, strict bool, customDecoders []CustomDecoder) (Pla
 		return media, MEDIA, nil
 	}
 	return nil, state.listType, errors.New("Can't detect playlist type")
-}
-
-// DecodeAttributeList turns an attribute list into a key, value map. You should trim
-// any characters not part of the attribute list, such as the tag and ':'.
-func DecodeAttributeList(line string) map[string]string {
-	return decodeParamsLine(line)
-}
-
-func decodeParamsLine(line string) map[string]string {
-	out := make(map[string]string)
-	for _, kv := range reKeyValue.FindAllStringSubmatch(line, -1) {
-		k, v := kv[1], kv[2]
-		out[k] = strings.Trim(v, ` "`)
-	}
-	return out
 }
 
 // Parse one line of master playlist.
@@ -301,7 +301,7 @@ func decodeLineOfMasterPlaylist(p *MasterPlaylist, state *decodingState, line st
 	case strings.HasPrefix(line, "#EXT-X-MEDIA:"):
 		var alt Alternative
 		state.listType = MASTER
-		for k, v := range decodeParamsLine(line[13:]) {
+		for k, v := range decoder.DecodeAttributeList(line[13:]) {
 			switch k {
 			case "TYPE":
 				alt.Type = v
@@ -341,7 +341,7 @@ func decodeLineOfMasterPlaylist(p *MasterPlaylist, state *decodingState, line st
 			state.alternatives = nil
 		}
 		p.Variants = append(p.Variants, state.variant)
-		for k, v := range decodeParamsLine(line[18:]) {
+		for k, v := range decoder.DecodeAttributeList(line[18:]) {
 			switch k {
 			case "PROGRAM-ID":
 				var val int
@@ -400,7 +400,7 @@ func decodeLineOfMasterPlaylist(p *MasterPlaylist, state *decodingState, line st
 			state.alternatives = nil
 		}
 		p.Variants = append(p.Variants, state.variant)
-		for k, v := range decodeParamsLine(line[26:]) {
+		for k, v := range decoder.DecodeAttributeList(line[26:]) {
 			switch k {
 			case "URI":
 				state.variant.URI = v
@@ -470,6 +470,29 @@ func decodeLineOfMediaPlaylist(p *MediaPlaylist, wv *WV, state *decodingState, l
 			}
 		}
 	}
+	if strings.HasPrefix(line, partialSegmentDecoder.TagName()) {
+		t, err := partialSegmentDecoder.DecodeToStruct(line)
+		if strict && err != nil {
+			return err
+		}
+
+		state.partialSegments = append(state.partialSegments, PartialSegment{
+			URI:      t.URI,
+			Duration: t.Duration,
+		})
+	}
+
+	if strings.HasPrefix(line, preloadHintDecoder.TagName()) {
+		t, err := preloadHintDecoder.DecodeToStruct(line)
+		if strict && err != nil {
+			return err
+		}
+		if t.Type == "PART" {
+			state.partialSegments = append(state.partialSegments, PartialSegment{
+				URI: t.URI,
+			})
+		}
+	}
 
 	switch {
 	case !state.tagInf && strings.HasPrefix(line, "#EXTINF:"):
@@ -534,6 +557,11 @@ func decodeLineOfMediaPlaylist(p *MediaPlaylist, wv *WV, state *decodingState, l
 				return err
 			}
 		}
+		if len(state.partialSegments) > 0 {
+			p.Segments[p.last()].Parts = state.partialSegments
+			state.partialSegments = nil
+		}
+
 		// If EXT-X-KEY appeared before reference to segment (EXTINF) then it linked to this segment
 		if state.tagKey {
 			p.Segments[p.last()].Key = &Key{state.xkey.Method, state.xkey.URI, state.xkey.IV, state.xkey.Keyformat, state.xkey.Keyformatversions}
@@ -577,6 +605,13 @@ func decodeLineOfMediaPlaylist(p *MediaPlaylist, wv *WV, state *decodingState, l
 		if _, err = fmt.Sscanf(line, "#EXT-X-TARGETDURATION:%f", &p.TargetDuration); strict && err != nil {
 			return err
 		}
+	case strings.HasPrefix(line, partialSegmentInfoDecoder.TagName()):
+		state.listType = MEDIA
+		info, err := partialSegmentInfoDecoder.DecodeToStruct(line)
+		if strict && err != nil {
+			return err
+		}
+		p.PartialTargetDuration = info.TargetDuration
 	case strings.HasPrefix(line, "#EXT-X-MEDIA-SEQUENCE:"):
 		state.listType = MEDIA
 		if _, err = fmt.Sscanf(line, "#EXT-X-MEDIA-SEQUENCE:%d", &p.SeqNo); strict && err != nil {
@@ -605,7 +640,7 @@ func decodeLineOfMediaPlaylist(p *MediaPlaylist, wv *WV, state *decodingState, l
 		}
 	case strings.HasPrefix(line, "#EXT-X-START:"):
 		state.listType = MEDIA
-		for k, v := range decodeParamsLine(line[13:]) {
+		for k, v := range decoder.DecodeAttributeList(line[13:]) {
 			switch k {
 			case "TIME-OFFSET":
 				st, err := strconv.ParseFloat(v, 64)
@@ -620,7 +655,7 @@ func decodeLineOfMediaPlaylist(p *MediaPlaylist, wv *WV, state *decodingState, l
 	case strings.HasPrefix(line, "#EXT-X-KEY:"):
 		state.listType = MEDIA
 		state.xkey = new(Key)
-		for k, v := range decodeParamsLine(line[11:]) {
+		for k, v := range decoder.DecodeAttributeList(line[11:]) {
 			switch k {
 			case "METHOD":
 				state.xkey.Method = v
@@ -638,7 +673,7 @@ func decodeLineOfMediaPlaylist(p *MediaPlaylist, wv *WV, state *decodingState, l
 	case strings.HasPrefix(line, "#EXT-X-MAP:"):
 		state.listType = MEDIA
 		state.xmap = new(Map)
-		for k, v := range decodeParamsLine(line[11:]) {
+		for k, v := range decoder.DecodeAttributeList(line[11:]) {
 			switch k {
 			case "URI":
 				state.xmap.URI = v
@@ -673,7 +708,7 @@ func decodeLineOfMediaPlaylist(p *MediaPlaylist, wv *WV, state *decodingState, l
 		state.listType = MEDIA
 		state.scte = new(SCTE)
 		state.scte.Syntax = SCTE35_67_2014
-		for attribute, value := range decodeParamsLine(line[12:]) {
+		for attribute, value := range decoder.DecodeAttributeList(line[12:]) {
 			switch attribute {
 			case "CUE":
 				state.scte.Cue = value
@@ -698,7 +733,7 @@ func decodeLineOfMediaPlaylist(p *MediaPlaylist, wv *WV, state *decodingState, l
 		state.scte = new(SCTE)
 		state.scte.Syntax = SCTE35_OATCLS
 		state.scte.CueType = SCTE35Cue_Mid
-		for attribute, value := range decodeParamsLine(line[20:]) {
+		for attribute, value := range decoder.DecodeAttributeList(line[20:]) {
 			switch attribute {
 			case "SCTE35":
 				state.scte.Cue = value
@@ -828,6 +863,20 @@ func decodeLineOfMediaPlaylist(p *MediaPlaylist, wv *WV, state *decodingState, l
 		// comments are ignored
 	}
 	return err
+}
+
+func afterMediaPlaylistWasDecoded(p *MediaPlaylist, state *decodingState, strict bool) error {
+	if len(state.partialSegments) > 0 {
+		p.NextSegment = &NextMediaSegment{
+			SeqId: p.SeqNo,
+			Parts: state.partialSegments,
+		}
+		if p.count > 0 {
+			p.NextSegment.SeqId = p.Segments[(p.capacity+p.tail-1)%p.capacity].SeqId + 1
+		}
+	}
+
+	return nil
 }
 
 // StrictTimeParse implements RFC3339 with Nanoseconds accuracy.

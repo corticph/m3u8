@@ -85,66 +85,68 @@ const (
 //
 // Simple Media Playlist file sample:
 //
-//    #EXTM3U
-//    #EXT-X-VERSION:3
-//    #EXT-X-TARGETDURATION:5220
-//    #EXTINF:5219.2,
-//    http://media.example.com/entire.ts
-//    #EXT-X-ENDLIST
+//	#EXTM3U
+//	#EXT-X-VERSION:3
+//	#EXT-X-TARGETDURATION:5220
+//	#EXTINF:5219.2,
+//	http://media.example.com/entire.ts
+//	#EXT-X-ENDLIST
 //
 // Sample of Sliding Window Media Playlist, using HTTPS:
 //
-//    #EXTM3U
-//    #EXT-X-VERSION:3
-//    #EXT-X-TARGETDURATION:8
-//    #EXT-X-MEDIA-SEQUENCE:2680
+//	#EXTM3U
+//	#EXT-X-VERSION:3
+//	#EXT-X-TARGETDURATION:8
+//	#EXT-X-MEDIA-SEQUENCE:2680
 //
-//    #EXTINF:7.975,
-//    https://priv.example.com/fileSequence2680.ts
-//    #EXTINF:7.941,
-//    https://priv.example.com/fileSequence2681.ts
-//    #EXTINF:7.975,
-//    https://priv.example.com/fileSequence2682.ts
+//	#EXTINF:7.975,
+//	https://priv.example.com/fileSequence2680.ts
+//	#EXTINF:7.941,
+//	https://priv.example.com/fileSequence2681.ts
+//	#EXTINF:7.975,
+//	https://priv.example.com/fileSequence2682.ts
 type MediaPlaylist struct {
-	TargetDuration   float64
-	SeqNo            uint64 // EXT-X-MEDIA-SEQUENCE
-	Segments         []*MediaSegment
-	Args             string // optional arguments placed after URIs (URI?Args)
-	Iframe           bool   // EXT-X-I-FRAMES-ONLY
-	Closed           bool   // is this VOD (closed) or Live (sliding) playlist?
-	MediaType        MediaType
-	DiscontinuitySeq uint64 // EXT-X-DISCONTINUITY-SEQUENCE
-	StartTime        float64
-	StartTimePrecise bool
-	durationAsInt    bool // output durations as integers of floats?
-	keyformat        int
-	winsize          uint // max number of segments displayed in an encoded playlist; need set to zero for VOD playlists
-	capacity         uint // total capacity of slice used for the playlist
-	head             uint // head of FIFO, we add segments to head
-	tail             uint // tail of FIFO, we remove segments from tail
-	count            uint // number of segments added to the playlist
-	buf              bytes.Buffer
-	ver              uint8
-	Key              *Key // EXT-X-KEY is optional encryption key displayed before any segments (default key for the playlist)
-	Map              *Map // EXT-X-MAP is optional tag specifies how to obtain the Media Initialization Section (default map for the playlist)
-	WV               *WV  // Widevine related tags outside of M3U8 specs
-	Custom           map[string]CustomTag
-	customDecoders   []CustomDecoder
+	TargetDuration        float64
+	PartialTargetDuration float64 // EXT-X-PART-INF
+	SeqNo                 uint64  // EXT-X-MEDIA-SEQUENCE
+	Segments              []*MediaSegment
+	Args                  string // optional arguments placed after URIs (URI?Args)
+	Iframe                bool   // EXT-X-I-FRAMES-ONLY
+	Closed                bool   // is this VOD (closed) or Live (sliding) playlist?
+	MediaType             MediaType
+	DiscontinuitySeq      uint64 // EXT-X-DISCONTINUITY-SEQUENCE
+	StartTime             float64
+	StartTimePrecise      bool
+	durationAsInt         bool // output durations as integers of floats?
+	keyformat             int
+	winsize               uint // max number of segments displayed in an encoded playlist; need set to zero for VOD playlists
+	capacity              uint // total capacity of slice used for the playlist
+	head                  uint // head of FIFO, we add segments to head
+	tail                  uint // tail of FIFO, we remove segments from tail
+	count                 uint // number of segments added to the playlist
+	buf                   bytes.Buffer
+	ver                   uint8
+	Key                   *Key // EXT-X-KEY is optional encryption key displayed before any segments (default key for the playlist)
+	Map                   *Map // EXT-X-MAP is optional tag specifies how to obtain the Media Initialization Section (default map for the playlist)
+	WV                    *WV  // Widevine related tags outside of M3U8 specs
+	Custom                map[string]CustomTag
+	customDecoders        []CustomDecoder
+	NextSegment           *NextMediaSegment
 }
 
 // MasterPlaylist structure represents a master playlist which
 // combines media playlists for multiple bitrates. URI lines in the
 // playlist identify media playlists. Sample of Master Playlist file:
 //
-//    #EXTM3U
-//    #EXT-X-STREAM-INF:PROGRAM-ID=1,BANDWIDTH=1280000
-//    http://example.com/low.m3u8
-//    #EXT-X-STREAM-INF:PROGRAM-ID=1,BANDWIDTH=2560000
-//    http://example.com/mid.m3u8
-//    #EXT-X-STREAM-INF:PROGRAM-ID=1,BANDWIDTH=7680000
-//    http://example.com/hi.m3u8
-//    #EXT-X-STREAM-INF:PROGRAM-ID=1,BANDWIDTH=65000,CODECS="mp4a.40.5"
-//    http://example.com/audio-only.m3u8
+//	#EXTM3U
+//	#EXT-X-STREAM-INF:PROGRAM-ID=1,BANDWIDTH=1280000
+//	http://example.com/low.m3u8
+//	#EXT-X-STREAM-INF:PROGRAM-ID=1,BANDWIDTH=2560000
+//	http://example.com/mid.m3u8
+//	#EXT-X-STREAM-INF:PROGRAM-ID=1,BANDWIDTH=7680000
+//	http://example.com/hi.m3u8
+//	#EXT-X-STREAM-INF:PROGRAM-ID=1,BANDWIDTH=65000,CODECS="mp4a.40.5"
+//	http://example.com/audio-only.m3u8
 type MasterPlaylist struct {
 	Variants            []*Variant
 	Args                string // optional arguments placed after URI (URI?Args)
@@ -215,6 +217,20 @@ type MediaSegment struct {
 	SCTE            *SCTE     // SCTE-35 used for Ad signaling in HLS
 	ProgramDateTime time.Time // EXT-X-PROGRAM-DATE-TIME tag associates the first sample of a media segment with an absolute date and/or time
 	Custom          map[string]CustomTag
+	Parts           []PartialSegment
+}
+
+// NextMediaSegment structure represents a partial data of upcoming media segment.
+type NextMediaSegment struct {
+	SeqId uint64
+	Parts []PartialSegment
+}
+
+// PartialSegment structure represents a partial media segment included in a
+// media playlist.
+type PartialSegment struct {
+	URI      string  // The value is a quoted-string containing the URI for the Partial Segment
+	Duration float64 // The value is the duration of the Partial Segment as a decimal-floating-point number of seconds. Empty if acquired from #EXT-X-PRELOAD-HINT tag
 }
 
 // SCTE holds custom, non EXT-X-DATERANGE, SCTE-35 tags
@@ -332,4 +348,5 @@ type decodingState struct {
 	xmap               *Map
 	scte               *SCTE
 	custom             map[string]CustomTag
+	partialSegments    []PartialSegment
 }
